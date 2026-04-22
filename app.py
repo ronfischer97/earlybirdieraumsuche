@@ -1,310 +1,293 @@
 """
-╔═══════════════════════════════════════════════════════════╗
-║         EARLYBIRDIE — Real Estate Aggregator              ║
-║         Streamlit Dashboard · app.py · PostgreSQL         ║
-╚═══════════════════════════════════════════════════════════╝
+EARLYBIRDIE — Indoorgolf Raumsuche Schweiz
+Smart Link Hub · app.py
 """
 
 import streamlit as st
-import psycopg2
-import psycopg2.extras
-import os
 
 # ─────────────────────────────────────────────
-# KONSTANTEN
+# KONFIGURATION
 # ─────────────────────────────────────────────
-PRIMARY_COLOR = "#004225"
-ACCENT_COLOR  = "#00A651"
-TEXT_LIGHT    = "#E8F5EE"
-CREDENTIALS   = {"Earlybirdie": "Raumsuche2026"}
+PRIMARY   = "#004225"
+LIGHT     = "#E8F5EE"
+ACCENT    = "#00A651"
+CREDENTIALS = {"Earlybirdie": "Raumsuche2026"}
 
-# Datenbank-URL — wird automatisch von Railway gesetzt
-DATABASE_URL = os.environ.get(
-    "DATABASE_URL",
-    "postgresql://postgres:axkMSXDLCFvMxpeByNRDjrPYuEvIwKsR@shinkansen.proxy.rlwy.net:26608/railway"
-)
-
+# Städte mit Such-URLs für alle Portale
+# URLs öffnen direkt gefilterte Suche: Gewerbe, 50-120m²
 CITIES = [
-    ("Luzern",      "🏔️"),
-    ("Zug",         "🏛️"),
-    ("Solothurn",   "🌿"),
-    ("Basel",       "🎨"),
-    ("Bern",        "🐻"),
-    ("Thun",        "⛰️"),
-    ("Winterthur",  "🏭"),
-    ("Frauenfeld",  "🌾"),
+    {
+        "name": "Luzern",
+        "icon": "🏔️",
+        "portale": [
+            {
+                "name": "ImmoScout24",
+                "url": "https://www.immoscout24.ch/de/gewerbe/mieten/ort-luzern?r=5&nrf=50&prf=120",
+                "color": "#E8041B",
+            },
+            {
+                "name": "Homegate",
+                "url": "https://www.homegate.ch/mieten/gewerbeobjekte/ort-luzern?ep=120&sp=50",
+                "color": "#FF6600",
+            },
+            {
+                "name": "Flatfox",
+                "url": "https://flatfox.ch/de/suche/?east=8.4&west=8.2&north=47.1&south=47.0&listing_type=COMMERCIAL",
+                "color": "#0066CC",
+            },
+            {
+                "name": "Comparis",
+                "url": "https://www.comparis.ch/immobilien/mieten/gewerbe?ort=Luzern&umkreis=5",
+                "color": "#009FE3",
+            },
+        ],
+    },
+    {
+        "name": "Zug",
+        "icon": "🏛️",
+        "portale": [
+            {"name": "ImmoScout24", "url": "https://www.immoscout24.ch/de/gewerbe/mieten/ort-zug?r=5&nrf=50&prf=120", "color": "#E8041B"},
+            {"name": "Homegate",   "url": "https://www.homegate.ch/mieten/gewerbeobjekte/ort-zug?ep=120&sp=50", "color": "#FF6600"},
+            {"name": "Flatfox",    "url": "https://flatfox.ch/de/suche/?east=8.6&west=8.4&north=47.2&south=47.1&listing_type=COMMERCIAL", "color": "#0066CC"},
+            {"name": "Comparis",   "url": "https://www.comparis.ch/immobilien/mieten/gewerbe?ort=Zug&umkreis=5", "color": "#009FE3"},
+        ],
+    },
+    {
+        "name": "Solothurn",
+        "icon": "🌿",
+        "portale": [
+            {"name": "ImmoScout24", "url": "https://www.immoscout24.ch/de/gewerbe/mieten/ort-solothurn?r=5&nrf=50&prf=120", "color": "#E8041B"},
+            {"name": "Homegate",   "url": "https://www.homegate.ch/mieten/gewerbeobjekte/ort-solothurn?ep=120&sp=50", "color": "#FF6600"},
+            {"name": "Flatfox",    "url": "https://flatfox.ch/de/suche/?east=7.6&west=7.4&north=47.3&south=47.1&listing_type=COMMERCIAL", "color": "#0066CC"},
+            {"name": "Comparis",   "url": "https://www.comparis.ch/immobilien/mieten/gewerbe?ort=Solothurn&umkreis=5", "color": "#009FE3"},
+        ],
+    },
+    {
+        "name": "Basel",
+        "icon": "🎨",
+        "portale": [
+            {"name": "ImmoScout24", "url": "https://www.immoscout24.ch/de/gewerbe/mieten/ort-basel?r=5&nrf=50&prf=120", "color": "#E8041B"},
+            {"name": "Homegate",   "url": "https://www.homegate.ch/mieten/gewerbeobjekte/ort-basel?ep=120&sp=50", "color": "#FF6600"},
+            {"name": "Flatfox",    "url": "https://flatfox.ch/de/suche/?east=7.7&west=7.5&north=47.6&south=47.5&listing_type=COMMERCIAL", "color": "#0066CC"},
+            {"name": "Comparis",   "url": "https://www.comparis.ch/immobilien/mieten/gewerbe?ort=Basel&umkreis=5", "color": "#009FE3"},
+        ],
+    },
+    {
+        "name": "Bern",
+        "icon": "🐻",
+        "portale": [
+            {"name": "ImmoScout24", "url": "https://www.immoscout24.ch/de/gewerbe/mieten/ort-bern?r=5&nrf=50&prf=120", "color": "#E8041B"},
+            {"name": "Homegate",   "url": "https://www.homegate.ch/mieten/gewerbeobjekte/ort-bern?ep=120&sp=50", "color": "#FF6600"},
+            {"name": "Flatfox",    "url": "https://flatfox.ch/de/suche/?east=7.5&west=7.3&north=47.0&south=46.9&listing_type=COMMERCIAL", "color": "#0066CC"},
+            {"name": "Comparis",   "url": "https://www.comparis.ch/immobilien/mieten/gewerbe?ort=Bern&umkreis=5", "color": "#009FE3"},
+        ],
+    },
+    {
+        "name": "Thun",
+        "icon": "⛰️",
+        "portale": [
+            {"name": "ImmoScout24", "url": "https://www.immoscout24.ch/de/gewerbe/mieten/ort-thun?r=5&nrf=50&prf=120", "color": "#E8041B"},
+            {"name": "Homegate",   "url": "https://www.homegate.ch/mieten/gewerbeobjekte/ort-thun?ep=120&sp=50", "color": "#FF6600"},
+            {"name": "Flatfox",    "url": "https://flatfox.ch/de/suche/?east=7.7&west=7.5&north=46.8&south=46.7&listing_type=COMMERCIAL", "color": "#0066CC"},
+            {"name": "Comparis",   "url": "https://www.comparis.ch/immobilien/mieten/gewerbe?ort=Thun&umkreis=5", "color": "#009FE3"},
+        ],
+    },
+    {
+        "name": "Winterthur",
+        "icon": "🏭",
+        "portale": [
+            {"name": "ImmoScout24", "url": "https://www.immoscout24.ch/de/gewerbe/mieten/ort-winterthur?r=5&nrf=50&prf=120", "color": "#E8041B"},
+            {"name": "Homegate",   "url": "https://www.homegate.ch/mieten/gewerbeobjekte/ort-winterthur?ep=120&sp=50", "color": "#FF6600"},
+            {"name": "Flatfox",    "url": "https://flatfox.ch/de/suche/?east=8.8&west=8.6&north=47.6&south=47.4&listing_type=COMMERCIAL", "color": "#0066CC"},
+            {"name": "Comparis",   "url": "https://www.comparis.ch/immobilien/mieten/gewerbe?ort=Winterthur&umkreis=5", "color": "#009FE3"},
+        ],
+    },
+    {
+        "name": "Frauenfeld",
+        "icon": "🌾",
+        "portale": [
+            {"name": "ImmoScout24", "url": "https://www.immoscout24.ch/de/gewerbe/mieten/ort-frauenfeld?r=5&nrf=50&prf=120", "color": "#E8041B"},
+            {"name": "Homegate",   "url": "https://www.homegate.ch/mieten/gewerbeobjekte/ort-frauenfeld?ep=120&sp=50", "color": "#FF6600"},
+            {"name": "Flatfox",    "url": "https://flatfox.ch/de/suche/?east=9.0&west=8.8&north=47.6&south=47.5&listing_type=COMMERCIAL", "color": "#0066CC"},
+            {"name": "Comparis",   "url": "https://www.comparis.ch/immobilien/mieten/gewerbe?ort=Frauenfeld&umkreis=5", "color": "#009FE3"},
+        ],
+    },
 ]
 
 # ─────────────────────────────────────────────
-# SEITEN-KONFIGURATION
+# SEITEN-CONFIG
 # ─────────────────────────────────────────────
 st.set_page_config(
     page_title="Earlybirdie · Raumsuche",
     page_icon="⛳",
     layout="wide",
-    initial_sidebar_state="expanded",
 )
 
 # ─────────────────────────────────────────────
-# GLOBALES CSS
+# CSS
 # ─────────────────────────────────────────────
 st.markdown(f"""
 <style>
-  @import url('https://fonts.googleapis.com/css2?family=Playfair+Display:wght@700;900&family=DM+Sans:wght@300;400;500&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Playfair+Display:wght@700;900&family=DM+Sans:wght@300;400;500;600&display=swap');
 
-  html, body, [class*="css"] {{
-      font-family: 'DM Sans', sans-serif;
-      background-color: #ffffff;
-  }}
-  .stApp {{ background: #f4f7f5; }}
+html, body, [class*="css"] {{
+    font-family: 'DM Sans', sans-serif;
+}}
+.stApp {{ background: #f4f7f5; }}
 
-  .eb-header {{
-      background: linear-gradient(135deg, {PRIMARY_COLOR} 0%, #006638 60%, #009150 100%);
-      border-radius: 16px;
-      padding: 2.5rem 3rem;
-      margin-bottom: 2rem;
-      display: flex;
-      align-items: center;
-      gap: 1.5rem;
-      box-shadow: 0 8px 32px rgba(0,66,37,0.25);
-  }}
-  .eb-header h1 {{
-      font-family: 'Playfair Display', serif;
-      font-size: 2.8rem;
-      font-weight: 900;
-      color: {TEXT_LIGHT};
-      margin: 0;
-      letter-spacing: -0.02em;
-  }}
-  .eb-header p {{
-      color: rgba(232,245,238,0.75);
-      font-size: 1rem;
-      margin: 0.25rem 0 0;
-      font-weight: 300;
-  }}
-  .eb-logo {{ font-size: 3.5rem; line-height: 1; }}
+/* Header */
+.eb-header {{
+    background: linear-gradient(135deg, {PRIMARY} 0%, #006638 60%, #009150 100%);
+    border-radius: 20px;
+    padding: 2.5rem 3rem;
+    margin-bottom: 2rem;
+    display: flex;
+    align-items: center;
+    gap: 1.5rem;
+    box-shadow: 0 8px 32px rgba(0,66,37,0.25);
+}}
+.eb-header h1 {{
+    font-family: 'Playfair Display', serif;
+    font-size: 2.8rem;
+    font-weight: 900;
+    color: {LIGHT};
+    margin: 0;
+    letter-spacing: -0.02em;
+}}
+.eb-header p {{
+    color: rgba(232,245,238,0.75);
+    font-size: 1rem;
+    margin: 0.25rem 0 0;
+}}
+.eb-logo {{ font-size: 3.5rem; line-height: 1; }}
 
-  .status-bar {{
-      background: white;
-      border: 1px solid #dde8e2;
-      border-radius: 10px;
-      padding: 0.7rem 1.2rem;
-      display: flex;
-      align-items: center;
-      gap: 1rem;
-      margin-bottom: 1.5rem;
-      font-size: 0.88rem;
-      color: #444;
-  }}
-  .status-dot {{
-      width: 10px; height: 10px;
-      border-radius: 50%;
-      background: {ACCENT_COLOR};
-      animation: pulse 2s infinite;
-  }}
-  @keyframes pulse {{
-      0%, 100% {{ opacity: 1; transform: scale(1); }}
-      50%       {{ opacity: 0.6; transform: scale(1.3); }}
-  }}
+/* Info-Banner */
+.info-banner {{
+    background: white;
+    border-left: 4px solid {ACCENT};
+    border-radius: 10px;
+    padding: 1rem 1.5rem;
+    margin-bottom: 2rem;
+    font-size: 0.9rem;
+    color: #444;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+}}
 
-  .listing-card {{
-      background: #ffffff;
-      border-radius: 16px;
-      overflow: hidden;
-      box-shadow: 0 2px 16px rgba(0,0,0,0.08);
-      transition: transform 0.25s ease, box-shadow 0.25s ease;
-      height: 100%;
-      display: flex;
-      flex-direction: column;
-      border: 1px solid rgba(0,66,37,0.08);
-  }}
-  .listing-card:hover {{
-      transform: translateY(-5px);
-      box-shadow: 0 12px 40px rgba(0,66,37,0.18);
-  }}
-  .card-img-wrap {{
-      width: 100%; height: 190px;
-      overflow: hidden;
-      background: #e8f0eb;
-      position: relative;
-  }}
-  .card-img-wrap img {{
-      width: 100%; height: 100%; object-fit: cover;
-  }}
-  .card-img-placeholder {{
-      width: 100%; height: 100%;
-      display: flex; align-items: center; justify-content: center;
-      background: linear-gradient(135deg, #e8f0eb, #c8ddd0);
-      font-size: 3rem; color: {PRIMARY_COLOR};
-  }}
-  .card-badge {{
-      position: absolute; top: 10px; right: 10px;
-      background: {PRIMARY_COLOR}; color: white;
-      font-size: 0.72rem; font-weight: 600;
-      padding: 3px 10px; border-radius: 20px;
-      letter-spacing: 0.04em; text-transform: uppercase;
-  }}
-  .card-body {{
-      padding: 1.1rem 1.2rem 1.3rem;
-      flex: 1; display: flex; flex-direction: column; gap: 0.4rem;
-  }}
-  .card-title {{
-      font-family: 'Playfair Display', serif;
-      font-size: 1.05rem; font-weight: 700;
-      color: #1a1a1a; line-height: 1.3; margin: 0;
-  }}
-  .card-location {{ font-size: 0.82rem; color: #666; }}
-  .card-meta {{ display: flex; gap: 1rem; margin-top: 0.5rem; }}
-  .card-chip {{
-      background: #f0f7f3; border: 1px solid #c8ddd0;
-      border-radius: 8px; padding: 0.25rem 0.7rem;
-      font-size: 0.8rem; font-weight: 500; color: {PRIMARY_COLOR};
-  }}
-  .card-price {{
-      font-size: 1.15rem; font-weight: 700;
-      color: {PRIMARY_COLOR}; margin-top: auto; padding-top: 0.6rem;
-  }}
-  .card-link-btn {{
-      display: block; background: {PRIMARY_COLOR}; color: white !important;
-      text-align: center; padding: 0.7rem;
-      text-decoration: none !important; font-weight: 600;
-      font-size: 0.88rem; border-radius: 0 0 14px 14px;
-      transition: background 0.2s; letter-spacing: 0.03em;
-  }}
-  .card-link-btn:hover {{ background: #006638; color: white !important; }}
-  .card-high-ceiling {{
-      background: #fffbe6; border: 1px solid #f0c040;
-      border-radius: 6px; padding: 0.2rem 0.6rem;
-      font-size: 0.75rem; color: #7a5c00; font-weight: 500;
-  }}
+/* Stadt-Karte */
+.city-card {{
+    background: white;
+    border-radius: 18px;
+    padding: 1.5rem;
+    box-shadow: 0 2px 16px rgba(0,0,0,0.07);
+    border: 1px solid rgba(0,66,37,0.08);
+    transition: transform 0.2s, box-shadow 0.2s;
+    height: 100%;
+}}
+.city-card:hover {{
+    transform: translateY(-4px);
+    box-shadow: 0 8px 32px rgba(0,66,37,0.15);
+}}
+.city-header {{
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    margin-bottom: 1.2rem;
+    padding-bottom: 1rem;
+    border-bottom: 2px solid #f0f7f3;
+}}
+.city-icon {{ font-size: 2rem; }}
+.city-name {{
+    font-family: 'Playfair Display', serif;
+    font-size: 1.3rem;
+    font-weight: 700;
+    color: {PRIMARY};
+    margin: 0;
+}}
+.portal-btn {{
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    background: #f8faf9;
+    border: 1px solid #e0ede6;
+    border-radius: 10px;
+    padding: 0.6rem 1rem;
+    margin-bottom: 0.5rem;
+    text-decoration: none !important;
+    color: #333 !important;
+    font-size: 0.88rem;
+    font-weight: 500;
+    transition: all 0.15s;
+}}
+.portal-btn:hover {{
+    background: {PRIMARY};
+    color: white !important;
+    border-color: {PRIMARY};
+    transform: translateX(4px);
+}}
+.portal-dot {{
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+}}
+.portal-name {{ flex: 1; margin-left: 0.6rem; }}
+.portal-arrow {{ opacity: 0.5; font-size: 0.8rem; }}
 
-  [data-testid="stSidebar"] {{ background: {PRIMARY_COLOR} !important; }}
-  [data-testid="stSidebar"] * {{ color: {TEXT_LIGHT} !important; }}
-  [data-testid="stSidebar"] h2, [data-testid="stSidebar"] h3 {{
-      font-family: 'Playfair Display', serif !important;
-  }}
+/* Login */
+.login-wrap {{
+    max-width: 400px;
+    margin: 6rem auto 0;
+    background: white;
+    border-radius: 20px;
+    padding: 2.5rem;
+    box-shadow: 0 8px 40px rgba(0,66,37,0.18);
+    border-top: 6px solid {PRIMARY};
+}}
 
-  .login-wrap {{
-      max-width: 400px; margin: 6rem auto 0;
-      background: white; border-radius: 20px;
-      padding: 2.5rem;
-      box-shadow: 0 8px 40px rgba(0,66,37,0.18);
-      border-top: 6px solid {PRIMARY_COLOR};
-  }}
-  .login-wrap h2 {{
-      font-family: 'Playfair Display', serif;
-      color: {PRIMARY_COLOR}; font-size: 1.8rem; margin-bottom: 0.3rem;
-  }}
+/* Buttons */
+.stButton > button {{
+    background: {PRIMARY} !important;
+    color: white !important;
+    border: none !important;
+    border-radius: 10px !important;
+    font-weight: 600 !important;
+}}
 
-  .stButton > button {{
-      background: {PRIMARY_COLOR} !important;
-      color: white !important; border: none !important;
-      border-radius: 10px !important; font-weight: 600 !important;
-  }}
-  .stButton > button:hover {{ background: #006638 !important; }}
+/* Sidebar */
+[data-testid="stSidebar"] {{ background: {PRIMARY} !important; }}
+[data-testid="stSidebar"] * {{ color: {LIGHT} !important; }}
+[data-testid="stSidebar"] h2 {{
+    font-family: 'Playfair Display', serif !important;
+}}
+
+/* Suchkriterien Box */
+.criteria-box {{
+    background: white;
+    border-radius: 14px;
+    padding: 1.2rem 1.5rem;
+    margin-bottom: 2rem;
+    display: flex;
+    gap: 2rem;
+    flex-wrap: wrap;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+    border: 1px solid #e0ede6;
+}}
+.criteria-item {{
+    text-align: center;
+}}
+.criteria-value {{
+    font-family: 'Playfair Display', serif;
+    font-size: 1.5rem;
+    font-weight: 700;
+    color: {PRIMARY};
+}}
+.criteria-label {{
+    font-size: 0.75rem;
+    color: #888;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}}
 </style>
 """, unsafe_allow_html=True)
-
-
-# ─────────────────────────────────────────────
-# DATENBANK
-# ─────────────────────────────────────────────
-def get_conn():
-    return psycopg2.connect(DATABASE_URL, sslmode="require")
-
-
-def count_listings() -> int:
-    try:
-        conn = get_conn()
-        cur = conn.cursor()
-        cur.execute("SELECT COUNT(*) FROM listings")
-        n = cur.fetchone()[0]
-        conn.close()
-        return n
-    except Exception:
-        return 0
-
-
-def load_listings(city=None, min_area=0, max_area=500,
-                  min_price=0, max_price=20000, sort_by="scraped_at") -> list:
-    try:
-        conn = get_conn()
-        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-
-        sort_map = {
-            "Neueste zuerst":   "scraped_at DESC",
-            "Fläche aufsteig.": "area_m2 ASC",
-            "Fläche absteig.":  "area_m2 DESC",
-            "Preis aufsteig.":  "price_chf ASC",
-            "Preis absteig.":   "price_chf DESC",
-        }
-        order = sort_map.get(sort_by, "scraped_at DESC")
-
-        if city:
-            cur.execute(f"""
-                SELECT * FROM listings
-                WHERE area_m2 BETWEEN %s AND %s
-                  AND (price_chf BETWEEN %s AND %s OR price_chf IS NULL)
-                  AND city = %s
-                ORDER BY {order}
-            """, (min_area, max_area, min_price, max_price, city))
-        else:
-            cur.execute(f"""
-                SELECT * FROM listings
-                WHERE area_m2 BETWEEN %s AND %s
-                  AND (price_chf BETWEEN %s AND %s OR price_chf IS NULL)
-                ORDER BY {order}
-            """, (min_area, max_area, min_price, max_price))
-
-        rows = cur.fetchall()
-        conn.close()
-        return [dict(r) for r in rows]
-    except Exception as e:
-        st.error(f"Datenbankfehler: {e}")
-        return []
-
-
-# ─────────────────────────────────────────────
-# KARTEN-RENDERER
-# ─────────────────────────────────────────────
-def render_card(listing: dict):
-    img_tag = (
-        f'<img src="{listing["image_url"]}" alt="Vorschau" loading="lazy" '
-        f'onerror="this.style.display=\'none\';this.nextSibling.style.display=\'flex\'">'
-        f'<div class="card-img-placeholder" style="display:none;">🏢</div>'
-        if listing.get("image_url")
-        else '<div class="card-img-placeholder">🏢</div>'
-    )
-    badge    = f'<span class="card-badge">{listing.get("portal","Portal")}</span>'
-    ceiling  = '<span class="card-high-ceiling">⬆️ Deckenhöhe ≥ 3 m</span>' if listing.get("ceiling_height_ok") else ""
-    area     = f'{listing["area_m2"]} m²' if listing.get("area_m2") else "–"
-    price    = f'CHF {listing["price_chf"]:,.0f} / Mt.' if listing.get("price_chf") else "Preis auf Anfrage"
-    title    = listing.get("title", "Gewerbefläche")
-    address  = listing.get("address") or listing.get("city", "")
-    snippet  = listing.get("description_snippet", "") or ""
-    link     = listing.get("listing_url", "#")
-
-    return f"""
-    <div class="listing-card">
-      <div class="card-img-wrap">
-        {img_tag}
-        {badge}
-      </div>
-      <div class="card-body">
-        <p class="card-title">{title}</p>
-        <p class="card-location">📍 {address}</p>
-        <div class="card-meta">
-          <span class="card-chip">📐 {area}</span>
-          {ceiling}
-        </div>
-        <p style="font-size:0.78rem;color:#888;margin-top:0.4rem;line-height:1.4">{snippet[:120]}...</p>
-        <p class="card-price">{price}</p>
-      </div>
-      <a href="{link}" target="_blank" rel="noopener" class="card-link-btn">
-        Details &amp; Link →
-      </a>
-    </div>
-    """
 
 
 # ─────────────────────────────────────────────
@@ -314,17 +297,19 @@ def show_login():
     st.markdown("""
     <div class="login-wrap">
       <div style="font-size:2.5rem;text-align:center;margin-bottom:0.5rem">⛳</div>
-      <h2 style="text-align:center">Earlybirdie</h2>
+      <h2 style="text-align:center;font-family:'Playfair Display',serif;color:#004225;margin-bottom:0.3rem">
+        Earlybirdie
+      </h2>
       <p style="text-align:center;color:#888;margin-bottom:1.5rem;font-size:0.9rem">
         Indoorgolf-Raumsuche Schweiz
       </p>
     </div>
     """, unsafe_allow_html=True)
-    with st.form("login_form"):
-        username = st.text_input("Benutzername")
-        password = st.text_input("Passwort", type="password")
+    with st.form("login"):
+        user = st.text_input("Benutzername")
+        pw   = st.text_input("Passwort", type="password")
         if st.form_submit_button("Einloggen", use_container_width=True):
-            if CREDENTIALS.get(username) == password:
+            if CREDENTIALS.get(user) == pw:
                 st.session_state["logged_in"] = True
                 st.rerun()
             else:
@@ -335,78 +320,125 @@ def show_login():
 # HAUPT-APP
 # ─────────────────────────────────────────────
 def show_app():
+    # Header
     st.markdown("""
     <div class="eb-header">
       <div class="eb-logo">⛳</div>
       <div>
         <h1>Earlybirdie</h1>
-        <p>Indoorgolf-Flächen Aggregator · Schweiz · 50–120 m² · Gewerbeflächen</p>
+        <p>Indoorgolf-Flächen Aggregator · Schweiz · Direkt zu den Inseraten</p>
       </div>
     </div>
     """, unsafe_allow_html=True)
 
-    total = count_listings()
-    st.markdown(f"""
-    <div class="status-bar">
-      <div class="status-dot"></div>
-      <strong>{total}</strong> Inserate in der Datenbank
-      &nbsp;·&nbsp; Nächster Crawl: täglich 12:00 Uhr
-      &nbsp;·&nbsp; Portale: ImmoScout24, Homegate, Comparis, Flatfox
+    # Suchkriterien
+    st.markdown("""
+    <div class="criteria-box">
+      <div class="criteria-item">
+        <div class="criteria-value">50–120</div>
+        <div class="criteria-label">m² Fläche</div>
+      </div>
+      <div class="criteria-item">
+        <div class="criteria-value">≥ 3m</div>
+        <div class="criteria-label">Deckenhöhe</div>
+      </div>
+      <div class="criteria-item">
+        <div class="criteria-value">5 km</div>
+        <div class="criteria-label">Radius</div>
+      </div>
+      <div class="criteria-item">
+        <div class="criteria-value">8</div>
+        <div class="criteria-label">Städte</div>
+      </div>
+      <div class="criteria-item">
+        <div class="criteria-value">4</div>
+        <div class="criteria-label">Portale</div>
+      </div>
     </div>
     """, unsafe_allow_html=True)
 
+    # Info
+    st.markdown("""
+    <div class="info-banner">
+      💡 <strong>So funktioniert's:</strong> Klicke auf einen Portal-Link einer Stadt —
+      die Suche öffnet sich direkt mit den richtigen Filtern (50–120 m², Gewerbe, 5 km Radius).
+      Du siehst immer die <strong>aktuellsten Inserate</strong> in Echtzeit.
+    </div>
+    """, unsafe_allow_html=True)
+
+    # Sidebar
     with st.sidebar:
-        st.markdown("## ⛳ Filter")
+        st.markdown("## ⛳ Earlybirdie")
         st.markdown("---")
-        sort_by     = st.selectbox("Sortierung", ["Neueste zuerst","Fläche aufsteig.","Fläche absteig.","Preis aufsteig.","Preis absteig."])
-        st.markdown("### 📐 Fläche (m²)")
-        area_range  = st.slider("", 50, 300, (50, 120), step=5)
-        st.markdown("### 💰 Mietpreis (CHF/Mt.)")
-        price_range = st.slider("", 0, 15000, (0, 8000), step=250)
-        st.markdown("### 🏙️ Stadt")
-        city_filter = st.selectbox("", ["Alle Städte"] + [c[0] for c in CITIES])
-        city_val    = None if city_filter == "Alle Städte" else city_filter
+        st.markdown("### 🔍 Suchkriterien")
+        st.markdown("**Fläche:** 50 – 120 m²")
+        st.markdown("**Typ:** Gewerbe / Büro")
+        st.markdown("**Radius:** 5 km")
+        st.markdown("**Deckenhöhe:** ≥ 3 m (manuell prüfen)")
+        st.markdown("---")
+        st.markdown("### 🏢 Portale")
+        st.markdown("🔴 ImmoScout24")
+        st.markdown("🟠 Homegate")
+        st.markdown("🔵 Flatfox")
+        st.markdown("🔵 Comparis")
         st.markdown("---")
         if st.button("🚪 Logout"):
             st.session_state["logged_in"] = False
             st.rerun()
 
-    # Stadtbuttons
-    st.markdown("### 🏙️ Stadt auswählen")
-    cols = st.columns(8)
-    for i, (city_name, icon) in enumerate(CITIES):
-        with cols[i]:
-            if st.button(f"{icon}\n{city_name}", key=f"city_{city_name}",
-                         use_container_width=True):
-                st.session_state["selected_city"] = city_name
-                st.rerun()
+    # Stadt-Karten Grid
+    st.markdown("### 🏙️ Stadt wählen — Portal öffnen")
 
-    if "selected_city" in st.session_state:
-        city_val = st.session_state["selected_city"]
+    cols = st.columns(4)
+    for i, city in enumerate(CITIES):
+        with cols[i % 4]:
+            # Portal-Links als HTML
+            portale_html = ""
+            for p in city["portale"]:
+                portale_html += f"""
+                <a href="{p['url']}" target="_blank" class="portal-btn">
+                    <span class="portal-dot" style="background:{p['color']}"></span>
+                    <span class="portal-name">{p['name']}</span>
+                    <span class="portal-arrow">↗</span>
+                </a>
+                """
+            st.markdown(f"""
+            <div class="city-card">
+                <div class="city-header">
+                    <span class="city-icon">{city['icon']}</span>
+                    <p class="city-name">{city['name']}</p>
+                </div>
+                {portale_html}
+            </div>
+            <br>
+            """, unsafe_allow_html=True)
 
-    listings = load_listings(
-        city=city_val,
-        min_area=area_range[0], max_area=area_range[1],
-        min_price=price_range[0], max_price=price_range[1],
-        sort_by=sort_by,
-    )
-
-    city_label = city_val if city_val else "Alle Städte"
-    st.markdown(f"### 🏢 {len(listings)} Ergebnis{'se' if len(listings)!=1 else ''} — {city_label}")
-
-    if not listings:
-        if total == 0:
-            st.info("📭 Die Datenbank ist noch leer. Der Crawler läuft täglich um 12:00 Uhr.")
-        else:
-            st.warning("Keine Inserate passen auf deine aktuellen Filter.")
-        return
-
-    for i in range(0, len(listings), 3):
-        cols = st.columns(3)
-        for col, listing in zip(cols, listings[i:i+3]):
-            with col:
-                st.markdown(render_card(listing), unsafe_allow_html=True)
-                st.markdown("")
+    # Tipps
+    st.markdown("---")
+    st.markdown("### 💡 Tipps für die Suche")
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.markdown("""
+        **🏗️ Deckenhöhe prüfen**
+        Filtere im Inserat nach Keywords:
+        *Raumhöhe, Deckenhöhe, Hallencharakter, Loft, Industriegebäude*
+        """)
+    with col2:
+        st.markdown("""
+        **📐 Fläche berechnen**
+        Für Indoorgolf brauchst du:
+        - 1 Bahn: ~8x4m = 32 m²
+        - 2 Bahnen: ~65 m²
+        - 3 Bahnen: ~95 m²
+        """)
+    with col3:
+        st.markdown("""
+        **💰 Preisverhandlung**
+        Gewerbeflächen in der Schweiz:
+        - Günstig: CHF 80–120/m²/Jahr
+        - Mittel: CHF 120–200/m²/Jahr
+        - Teuer: > CHF 200/m²/Jahr
+        """)
 
 
 # ─────────────────────────────────────────────
