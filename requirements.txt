@@ -1,23 +1,4 @@
-# ══════════════════════════════════════════════════
-#  Earlybirdie — Real Estate Aggregator
-#  requirements.txt
-#
-#  Installation:
-#    pip install -r requirements.txt
-#    playwright install chromium
-# ══════════════════════════════════════════════════
-
-# Web-App
 streamlit>=1.35.0
-
-# Browser-Automatisierung (Scraping)
 playwright>=1.44.0
-
-# Datenbank
-# sqlite3 ist Teil der Python-Standardbibliothek – kein separates Paket nötig
-
-# Hilfs-Bibliotheken
+psycopg2-binary>=2.9.9
 pandas>=2.2.0
-
-# Optional: für erweiterte Analyse / Export
-openpyxl>=3.1.0
