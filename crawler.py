@@ -1,44 +1,19 @@
 """
-EARLYBIRDIE — Crawler · crawler.py (PostgreSQL + Auto-Chromium)
+EARLYBIRDIE — Crawler ohne Browser (requests + BeautifulSoup)
+Kein Playwright, kein Chromium — läuft auf jedem Server!
 """
 
-import asyncio
 import hashlib
 import logging
 import os
 import re
-import subprocess
-import sys
+import time
 from datetime import datetime
 from typing import Optional
 
-# ── Chromium automatisch installieren ──────────────────────
-def install_chromium():
-    """Installiert Chromium-Browser falls noch nicht vorhanden."""
-    chromium_path = os.path.expanduser(
-        "~/.cache/ms-playwright/chromium_headless_shell-1208/"
-        "chrome-headless-shell-linux64/chrome-headless-shell"
-    )
-    if not os.path.exists(chromium_path):
-        print("Installiere Chromium...", flush=True)
-        subprocess.run(
-            [sys.executable, "-m", "playwright", "install", "chromium"],
-            check=True
-        )
-        subprocess.run(
-            [sys.executable, "-m", "playwright", "install-deps", "chromium"],
-            check=False  # Fehler hier nicht abbrechen lassen
-        )
-        print("Chromium installiert!", flush=True)
-    else:
-        print("Chromium bereits vorhanden.", flush=True)
-
-install_chromium()
-
-# ── Jetzt erst Playwright importieren ──────────────────────
 import psycopg2
-import psycopg2.extras
-from playwright.async_api import async_playwright, BrowserContext, Page
+import requests
+from bs4 import BeautifulSoup
 
 # ─────────────────────────────────────────────
 # LOGGING
@@ -73,11 +48,15 @@ CEILING_KEYWORDS = [
     "hallencharakter", "industrie", "loft",
 ]
 
-USER_AGENT = (
-    "Mozilla/5.0 (X11; Linux x86_64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/124.0.0.0 Safari/537.36"
-)
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept-Language": "de-CH,de;q=0.9",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+}
 
 
 # ─────────────────────────────────────────────
@@ -112,8 +91,6 @@ def init_db():
     cur.execute("""
         CREATE TABLE IF NOT EXISTS crawl_log (
             run_id    TEXT,
-            portal    TEXT,
-            city      TEXT,
             found     INTEGER,
             inserted  INTEGER,
             started   TEXT,
@@ -122,11 +99,11 @@ def init_db():
     """)
     conn.commit()
     conn.close()
-    log.info("Datenbank bereit (PostgreSQL)")
+    log.info("Datenbank bereit.")
 
 
-def make_id(url: str) -> str:
-    return hashlib.sha1(url.encode()).hexdigest()[:16]
+def make_id(text: str) -> str:
+    return hashlib.sha1(text.encode()).hexdigest()[:16]
 
 
 def upsert_listing(listing: dict) -> bool:
@@ -154,214 +131,295 @@ def upsert_listing(listing: dict) -> bool:
 # ─────────────────────────────────────────────
 # HILFSFUNKTIONEN
 # ─────────────────────────────────────────────
-def check_ceiling_height(text: str) -> bool:
-    return any(kw in text.lower() for kw in CEILING_KEYWORDS)
+def check_ceiling(text: str) -> bool:
+    t = text.lower()
+    return any(kw in t for kw in CEILING_KEYWORDS)
 
 def parse_area(text: str) -> Optional[float]:
-    text = text.replace("'", "").replace(" ", "")
+    text = text.replace("'", "").replace("\u2019", "")
     m = re.search(r"(\d+[\.,]?\d*)\s*m[²2]?", text, re.IGNORECASE)
     return float(m.group(1).replace(",", ".")) if m else None
 
 def parse_price(text: str) -> Optional[float]:
-    text = text.replace("'", "").replace(" ", "")
-    m = re.search(r"(?:CHF|Fr\.?)[\s]?(\d+[\.,]?\d*)", text, re.IGNORECASE)
+    text = text.replace("'", "").replace("\u2019", "").replace(" ", "")
+    m = re.search(r"(?:CHF|Fr\.?)[\s]?(\d[\d'.]*)", text, re.IGNORECASE)
     if not m:
-        m = re.search(r"(\d{3,}[\.,]?\d*)", text)
-    return float(m.group(1).replace(",", ".")) if m else None
+        m = re.search(r"(\d{3,})", text)
+    if m:
+        val = m.group(1).replace("'","").replace(".","")
+        try: return float(val)
+        except: return None
+    return None
 
-def in_area_range(area: Optional[float]) -> bool:
+def in_range(area: Optional[float]) -> bool:
     return area is None or MIN_AREA <= area <= MAX_AREA
 
-async def slow_scroll(page: Page, steps=5, delay=0.6):
-    for _ in range(steps):
-        await page.evaluate("window.scrollBy(0, window.innerHeight * 0.8)")
-        await asyncio.sleep(delay)
+def fetch(url: str, timeout=15) -> Optional[BeautifulSoup]:
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=timeout)
+        if r.status_code == 200:
+            return BeautifulSoup(r.text, "html.parser")
+    except Exception as e:
+        log.warning("Fetch-Fehler %s: %s", url, e)
+    return None
 
 
 # ─────────────────────────────────────────────
-# SCRAPER
+# PORTAL 1: FLATFOX (JSON-API — sehr zuverlässig)
 # ─────────────────────────────────────────────
-class ImmoScoutScraper:
-    PORTAL = "ImmoScout24"
-    def __init__(self, ctx): self.ctx = ctx
-
-    async def scrape_city(self, city, lat, lon):
-        results = []
-        slug = city.lower().replace("ü","ue").replace("ä","ae")
-        url  = (f"https://www.immoscout24.ch/de/gewerbe/mieten/ort-{slug}"
-                f"?r={RADIUS_KM}&nrf={MIN_AREA}&prf={MAX_AREA}")
-        page = await self.ctx.new_page()
-        try:
-            await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-            await asyncio.sleep(2)
-            await slow_scroll(page)
-            try: await page.click('[id*="cookie"] button', timeout=3000)
-            except: pass
-            cards = await page.query_selector_all("article, div[class*='ResultList__listItem']")
-            for card in cards[:30]:
-                try:
-                    raw     = await card.inner_text()
-                    href_el = await card.query_selector("a[href]")
-                    href    = await href_el.get_attribute("href") if href_el else ""
-                    if href and not href.startswith("http"):
-                        href = "https://www.immoscout24.ch" + href
-                    img_el  = await card.query_selector("img")
-                    img_url = ""
-                    if img_el:
-                        img_url = await img_el.get_attribute("data-src") or await img_el.get_attribute("src") or ""
-                    area  = parse_area(raw)
-                    price = parse_price(raw)
-                    if not in_area_range(area): continue
-                    results.append({
-                        "id": make_id(href or raw[:80]), "portal": self.PORTAL,
-                        "title": raw.split("\n")[0][:120], "city": city, "address": city,
-                        "area_m2": area, "price_chf": price,
-                        "ceiling_height_ok": check_ceiling_height(raw),
-                        "image_url": img_url, "listing_url": href,
-                        "description_snippet": raw[:300],
-                    })
-                except: pass
-        except Exception as e:
-            log.error("[%s] %s: %s", self.PORTAL, city, e)
-        finally:
-            await page.close()
-        log.info("[%s] %s: %d gefunden", self.PORTAL, city, len(results))
-        return results
+def scrape_flatfox(city: str, lat: float, lon: float) -> list[dict]:
+    results = []
+    url = (
+        f"https://flatfox.ch/api/v1/listing/"
+        f"?latitude={lat}&longitude={lon}"
+        f"&radius={RADIUS_KM * 1000}"
+        f"&listing_type=COMMERCIAL"
+        f"&floor_space_from={MIN_AREA}"
+        f"&floor_space_to={MAX_AREA}"
+    )
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=15)
+        if r.status_code != 200:
+            log.warning("[Flatfox] %s: HTTP %d", city, r.status_code)
+            return []
+        data = r.json()
+        for item in data.get("results", [])[:30]:
+            area  = item.get("floor_space")
+            price = item.get("rent_net") or item.get("price_display")
+            if isinstance(price, str):
+                price = parse_price(price)
+            if not in_range(area):
+                continue
+            href    = f"https://flatfox.ch/de/wohnung/{item.get('pk','')}/"
+            desc    = item.get("description", "") or ""
+            imgs    = item.get("images", [])
+            img_url = imgs[0].get("url", "") if imgs else ""
+            results.append({
+                "id":                  make_id(str(item.get("pk", href))),
+                "portal":              "Flatfox",
+                "title":               (item.get("title") or "Gewerbefläche")[:120],
+                "city":                city,
+                "address":             item.get("street") or city,
+                "area_m2":             float(area) if area else None,
+                "price_chf":           float(price) if price else None,
+                "ceiling_height_ok":   check_ceiling(desc),
+                "image_url":           img_url,
+                "listing_url":         href,
+                "description_snippet": desc[:300],
+            })
+    except Exception as e:
+        log.error("[Flatfox] %s: %s", city, e)
+    log.info("[Flatfox] %s: %d gefunden", city, len(results))
+    return results
 
 
-class HomegateScraper:
-    PORTAL = "Homegate"
-    def __init__(self, ctx): self.ctx = ctx
+# ─────────────────────────────────────────────
+# PORTAL 2: HOMEGATE (HTML-Scraping)
+# ─────────────────────────────────────────────
+def scrape_homegate(city: str, lat: float, lon: float) -> list[dict]:
+    results = []
+    city_slug = city.lower()
+    url = (
+        f"https://www.homegate.ch/mieten/gewerbeobjekte/ort-{city_slug}"
+        f"?ep={MAX_AREA}&sp={MIN_AREA}"
+    )
+    soup = fetch(url)
+    if not soup:
+        log.warning("[Homegate] %s: Keine Antwort", city)
+        return []
+    try:
+        # Homegate rendert via JS — wir holen was statisch verfügbar ist
+        cards = soup.find_all(["article", "div"], 
+                               attrs={"data-test": re.compile("result|listing|item", re.I)})
+        if not cards:
+            # Fallback: alle Links die nach Inseraten aussehen
+            cards = soup.find_all("a", href=re.compile(r"/mieten/\d+"))[:20]
 
-    async def scrape_city(self, city, lat, lon):
-        results = []
-        url = (f"https://www.homegate.ch/mieten/gewerbeobjekte/ort-{city.lower()}"
-               f"?ep={MAX_AREA}&sp={MIN_AREA}")
-        page = await self.ctx.new_page()
-        try:
-            await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-            await asyncio.sleep(2)
-            await slow_scroll(page)
-            try: await page.click('button[id*="accept"]', timeout=3000)
-            except: pass
-            cards = await page.query_selector_all("div[data-test='result-list-item'], article")
-            for card in cards[:30]:
-                try:
-                    raw     = await card.inner_text()
-                    href_el = await card.query_selector("a")
-                    href    = await href_el.get_attribute("href") if href_el else ""
-                    if href and not href.startswith("http"):
-                        href = "https://www.homegate.ch" + href
-                    img_el  = await card.query_selector("img")
-                    img_url = ""
-                    if img_el:
-                        img_url = await img_el.get_attribute("data-src") or await img_el.get_attribute("src") or ""
-                    area  = parse_area(raw)
-                    price = parse_price(raw)
-                    if not in_area_range(area): continue
-                    results.append({
-                        "id": make_id(href or raw[:80]), "portal": self.PORTAL,
-                        "title": raw.split("\n")[0][:120], "city": city, "address": city,
-                        "area_m2": area, "price_chf": price,
-                        "ceiling_height_ok": check_ceiling_height(raw),
-                        "image_url": img_url, "listing_url": href,
-                        "description_snippet": raw[:300],
-                    })
-                except: pass
-        except Exception as e:
-            log.error("[%s] %s: %s", self.PORTAL, city, e)
-        finally:
-            await page.close()
-        log.info("[%s] %s: %d gefunden", self.PORTAL, city, len(results))
-        return results
+        for card in cards[:20]:
+            text = card.get_text(" ", strip=True)
+            if not text or len(text) < 20:
+                continue
+            href = card.get("href", "") or ""
+            if card.name != "a":
+                a = card.find("a", href=True)
+                href = a["href"] if a else ""
+            if href and not href.startswith("http"):
+                href = "https://www.homegate.ch" + href
+            img = card.find("img")
+            img_url = ""
+            if img:
+                img_url = img.get("data-src") or img.get("src") or ""
+            area  = parse_area(text)
+            price = parse_price(text)
+            if not in_range(area):
+                continue
+            title = text[:80].split("\n")[0]
+            results.append({
+                "id":                  make_id(href or text[:80]),
+                "portal":              "Homegate",
+                "title":               title,
+                "city":                city,
+                "address":             city,
+                "area_m2":             area,
+                "price_chf":           price,
+                "ceiling_height_ok":   check_ceiling(text),
+                "image_url":           img_url,
+                "listing_url":         href,
+                "description_snippet": text[:300],
+            })
+    except Exception as e:
+        log.error("[Homegate] %s: %s", city, e)
+    log.info("[Homegate] %s: %d gefunden", city, len(results))
+    return results
 
 
-class FlatfoxScraper:
-    PORTAL = "Flatfox"
-    def __init__(self, ctx): self.ctx = ctx
+# ─────────────────────────────────────────────
+# PORTAL 3: IMMOSCOUT24 (HTML-Scraping)
+# ─────────────────────────────────────────────
+def scrape_immoscout(city: str, lat: float, lon: float) -> list[dict]:
+    results = []
+    slug = city.lower().replace("ü","ue").replace("ä","ae").replace("ö","oe")
+    url  = (
+        f"https://www.immoscout24.ch/de/gewerbe/mieten/ort-{slug}"
+        f"?r={RADIUS_KM}&nrf={MIN_AREA}&prf={MAX_AREA}"
+    )
+    soup = fetch(url)
+    if not soup:
+        log.warning("[ImmoScout24] %s: Keine Antwort", city)
+        return []
+    try:
+        cards = soup.find_all("article")
+        if not cards:
+            cards = soup.find_all("div", class_=re.compile(r"listing|result|item", re.I))
 
-    async def scrape_city(self, city, lat, lon):
-        results = []
-        url = (f"https://flatfox.ch/api/v1/listing/"
-               f"?latitude={lat}&longitude={lon}&radius={RADIUS_KM*1000}"
-               f"&listing_type=COMMERCIAL&floor_space_from={MIN_AREA}&floor_space_to={MAX_AREA}")
-        page = await self.ctx.new_page()
-        try:
-            resp = await page.goto(url, wait_until="load", timeout=20000)
-            if resp and resp.status == 200:
-                data = await page.evaluate("() => JSON.parse(document.body.innerText)")
-                for item in data.get("results", [])[:30]:
-                    area  = item.get("floor_space")
-                    price = item.get("rent_net")
-                    if isinstance(price, str): price = parse_price(price)
-                    if not in_area_range(area): continue
-                    href    = f"https://flatfox.ch/de/wohnung/{item.get('pk','')}/"
-                    desc    = item.get("description", "")
-                    imgs    = item.get("images", [])
-                    img_url = imgs[0].get("url","") if imgs else ""
-                    results.append({
-                        "id": make_id(str(item.get("pk", href))), "portal": self.PORTAL,
-                        "title": item.get("title","Gewerbefläche")[:120],
-                        "city": city, "address": item.get("street", city),
-                        "area_m2": float(area) if area else None,
-                        "price_chf": float(price) if price else None,
-                        "ceiling_height_ok": check_ceiling_height(desc),
-                        "image_url": img_url, "listing_url": href,
-                        "description_snippet": desc[:300],
-                    })
-        except Exception as e:
-            log.error("[%s] %s: %s", self.PORTAL, city, e)
-        finally:
-            await page.close()
-        log.info("[%s] %s: %d gefunden", self.PORTAL, city, len(results))
-        return results
+        for card in cards[:20]:
+            text = card.get_text(" ", strip=True)
+            if not text or len(text) < 20:
+                continue
+            a    = card.find("a", href=True)
+            href = a["href"] if a else ""
+            if href and not href.startswith("http"):
+                href = "https://www.immoscout24.ch" + href
+            img = card.find("img")
+            img_url = ""
+            if img:
+                img_url = img.get("data-src") or img.get("src") or ""
+            area  = parse_area(text)
+            price = parse_price(text)
+            if not in_range(area):
+                continue
+            results.append({
+                "id":                  make_id(href or text[:80]),
+                "portal":              "ImmoScout24",
+                "title":               text[:80].split("\n")[0],
+                "city":                city,
+                "address":             city,
+                "area_m2":             area,
+                "price_chf":           price,
+                "ceiling_height_ok":   check_ceiling(text),
+                "image_url":           img_url,
+                "listing_url":         href,
+                "description_snippet": text[:300],
+            })
+    except Exception as e:
+        log.error("[ImmoScout24] %s: %s", city, e)
+    log.info("[ImmoScout24] %s: %d gefunden", city, len(results))
+    return results
+
+
+# ─────────────────────────────────────────────
+# PORTAL 4: COMPARIS (JSON-API)
+# ─────────────────────────────────────────────
+def scrape_comparis(city: str, lat: float, lon: float) -> list[dict]:
+    results = []
+    try:
+        # Comparis hat eine interne API
+        api_url = "https://api.comparis.ch/realestate/searchresult"
+        payload = {
+            "RequestObject": {
+                "RentOrBuy": "rent",
+                "PropertyType": "commercial",
+                "Zip": [],
+                "City": city,
+                "RoomFrom": None,
+                "RoomTo": None,
+                "FloorSpaceFrom": MIN_AREA,
+                "FloorSpaceTo": MAX_AREA,
+                "PageIndex": 0,
+                "PageSize": 20,
+            }
+        }
+        headers = {**HEADERS, "Content-Type": "application/json"}
+        r = requests.post(api_url, json=payload, headers=headers, timeout=15)
+        if r.status_code == 200:
+            data = r.json()
+            items = data.get("Items") or data.get("Results") or []
+            for item in items[:20]:
+                area  = item.get("FloorSpace") or item.get("LivingSpace")
+                price = item.get("Price") or item.get("Rent")
+                if not in_range(area):
+                    continue
+                listing_id = str(item.get("Id", ""))
+                href    = f"https://www.comparis.ch/immobilien/marktplatz/details/{listing_id}"
+                desc    = item.get("Description", "") or ""
+                img_url = item.get("MainImageUrl", "") or ""
+                title   = item.get("Title") or item.get("PropertyType") or "Gewerbefläche"
+                results.append({
+                    "id":                  make_id(listing_id or href),
+                    "portal":              "Comparis",
+                    "title":               str(title)[:120],
+                    "city":                city,
+                    "address":             item.get("Street", city),
+                    "area_m2":             float(area) if area else None,
+                    "price_chf":           float(price) if price else None,
+                    "ceiling_height_ok":   check_ceiling(desc),
+                    "image_url":           img_url,
+                    "listing_url":         href,
+                    "description_snippet": str(desc)[:300],
+                })
+    except Exception as e:
+        log.error("[Comparis] %s: %s", city, e)
+    log.info("[Comparis] %s: %d gefunden", city, len(results))
+    return results
 
 
 # ─────────────────────────────────────────────
 # HAUPT-CRAWL
 # ─────────────────────────────────────────────
-async def run_crawl():
+def run_crawl():
     run_id = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
     log.info("═══ Earlybirdie Crawl gestartet · %s ═══", run_id)
     init_db()
+
     total_found = total_inserted = 0
+    scrapers = [scrape_flatfox, scrape_homegate, scrape_immoscout, scrape_comparis]
 
-    async with async_playwright() as pw:
-        browser = await pw.chromium.launch(
-            headless=True,
-            args=["--no-sandbox","--disable-setuid-sandbox",
-                  "--disable-blink-features=AutomationControlled"],
-        )
-        context = await browser.new_context(
-            user_agent=USER_AGENT,
-            viewport={"width": 1280, "height": 900},
-            locale="de-CH", timezone_id="Europe/Zurich",
-        )
-        await context.add_init_script(
-            "Object.defineProperty(navigator,'webdriver',{get:()=>undefined})"
-        )
-        scrapers = [ImmoScoutScraper(context), HomegateScraper(context), FlatfoxScraper(context)]
-        for city, (lat, lon) in CITIES.items():
-            for scraper in scrapers:
-                try:
-                    listings = await scraper.scrape_city(city, lat, lon)
-                    total_found += len(listings)
-                    inserted = sum(1 for lst in listings if upsert_listing(lst))
-                    total_inserted += inserted
-                    log.info("  ✓ %s/%s: %d neu", scraper.PORTAL, city, inserted)
-                    await asyncio.sleep(2.5)
-                except Exception as e:
-                    log.error("Fehler %s/%s: %s", scraper.PORTAL, city, e)
-        await browser.close()
+    for city, (lat, lon) in CITIES.items():
+        for scraper in scrapers:
+            try:
+                listings = scraper(city, lat, lon)
+                total_found += len(listings)
+                inserted = sum(1 for lst in listings if upsert_listing(lst))
+                total_inserted += inserted
+                log.info("  ✓ %s/%s: %d neu von %d", scraper.__name__, city, inserted, len(listings))
+            except Exception as e:
+                log.error("Fehler %s/%s: %s", scraper.__name__, city, e)
+            time.sleep(1.5)  # Höfliche Pause
 
+    # Crawl-Log
     conn = get_connection()
     cur  = conn.cursor()
-    cur.execute("INSERT INTO crawl_log VALUES (%s,%s,%s,%s,%s,%s,%s)",
-        (run_id,"ALL","ALL",total_found,total_inserted,run_id,datetime.utcnow().isoformat()))
+    cur.execute(
+        "INSERT INTO crawl_log VALUES (%s,%s,%s,%s,%s)",
+        (run_id, total_found, total_inserted,
+         run_id, datetime.utcnow().isoformat()),
+    )
     conn.commit()
     conn.close()
-    log.info("═══ Fertig · %d gefunden · %d neu ═══", total_found, total_inserted)
+
+    log.info("═══ Fertig · %d gefunden · %d neu gespeichert ═══",
+             total_found, total_inserted)
 
 
 if __name__ == "__main__":
-    asyncio.run(run_crawl())
+    run_crawl()
