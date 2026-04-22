@@ -1,6 +1,6 @@
 """
-EARLYBIRDIE — Crawler ohne Browser (requests + BeautifulSoup)
-Kein Playwright, kein Chromium — läuft auf jedem Server!
+EARLYBIRDIE — Crawler v3 (requests + BeautifulSoup)
+Portale: Flatfox API, ImmoScout24, Homegate, Anibis
 """
 
 import hashlib
@@ -8,54 +8,48 @@ import logging
 import os
 import re
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 import psycopg2
 import requests
 from bs4 import BeautifulSoup
 
-# ─────────────────────────────────────────────
-# LOGGING
-# ─────────────────────────────────────────────
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("earlybirdie")
 
-# ─────────────────────────────────────────────
-# KONFIGURATION
-# ─────────────────────────────────────────────
 MIN_AREA  = 50
 MAX_AREA  = 120
 RADIUS_KM = 5
 
 CITIES = {
-    "Luzern":      (47.0502, 8.3093),
-    "Zug":         (47.1661, 8.5158),
-    "Solothurn":   (47.2088, 7.5323),
-    "Basel":       (47.5596, 7.5886),
-    "Bern":        (46.9480, 7.4474),
-    "Thun":        (46.7580, 7.6280),
-    "Winterthur":  (47.5001, 8.7501),
-    "Frauenfeld":  (47.5574, 8.8986),
+    "Luzern":     (47.0502, 8.3093),
+    "Zug":        (47.1661, 8.5158),
+    "Solothurn":  (47.2088, 7.5323),
+    "Basel":      (47.5596, 7.5886),
+    "Bern":       (46.9480, 7.4474),
+    "Thun":       (46.7580, 7.6280),
+    "Winterthur": (47.5001, 8.7501),
+    "Frauenfeld": (47.5574, 8.8986),
 }
 
 CEILING_KEYWORDS = [
     "raumhöhe", "deckenhöhe", "lichte höhe", "3 m", "3m",
-    "3.0m", "3,0m", "3.5m", "3,5m", "4m", "hohe decke",
-    "hallencharakter", "industrie", "loft",
+    "3.0m", "3,0m", "3.5m", "hohe decke", "hallencharakter", "loft",
 ]
 
+# Realistischer Browser-Header
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/124.0.0.0 Safari/537.36"
     ),
-    "Accept-Language": "de-CH,de;q=0.9",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "de-CH,de;q=0.9,en;q=0.8",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Connection": "keep-alive",
+    "Upgrade-Insecure-Requests": "1",
 }
 
 
@@ -88,11 +82,12 @@ def init_db():
             scraped_at          TEXT
         )
     """)
+    # crawl_log mit TEXT-Feldern (kein INTEGER für run_id)
     cur.execute("""
         CREATE TABLE IF NOT EXISTS crawl_log (
             run_id    TEXT,
-            found     INTEGER,
-            inserted  INTEGER,
+            found     TEXT,
+            inserted  TEXT,
             started   TEXT,
             finished  TEXT
         )
@@ -120,7 +115,8 @@ def upsert_listing(listing: dict) -> bool:
         listing.get("city"), listing.get("address"), listing.get("area_m2"),
         listing.get("price_chf"), 1 if listing.get("ceiling_height_ok") else 0,
         listing.get("image_url"), listing.get("listing_url"),
-        listing.get("description_snippet"), datetime.utcnow().isoformat(),
+        listing.get("description_snippet"),
+        datetime.now(timezone.utc).isoformat(),
     ))
     is_new = cur.rowcount > 0
     conn.commit()
@@ -142,30 +138,36 @@ def parse_area(text: str) -> Optional[float]:
 
 def parse_price(text: str) -> Optional[float]:
     text = text.replace("'", "").replace("\u2019", "").replace(" ", "")
-    m = re.search(r"(?:CHF|Fr\.?)[\s]?(\d[\d'.]*)", text, re.IGNORECASE)
+    m = re.search(r"(?:CHF|Fr\.?)[\s]?(\d[\d'.,]*)", text, re.IGNORECASE)
     if not m:
         m = re.search(r"(\d{3,})", text)
     if m:
-        val = m.group(1).replace("'","").replace(".","")
-        try: return float(val)
-        except: return None
+        try:
+            return float(m.group(1).replace("'","").replace(",",""))
+        except:
+            return None
     return None
 
 def in_range(area: Optional[float]) -> bool:
     return area is None or MIN_AREA <= area <= MAX_AREA
 
-def fetch(url: str, timeout=15) -> Optional[BeautifulSoup]:
+def fetch_html(url: str, timeout=20) -> Optional[BeautifulSoup]:
     try:
-        r = requests.get(url, headers=HEADERS, timeout=timeout)
+        session = requests.Session()
+        session.headers.update(HEADERS)
+        r = session.get(url, timeout=timeout, allow_redirects=True)
+        log.debug("GET %s → %d", url, r.status_code)
         if r.status_code == 200:
             return BeautifulSoup(r.text, "html.parser")
+        else:
+            log.warning("HTTP %d für %s", r.status_code, url)
     except Exception as e:
         log.warning("Fetch-Fehler %s: %s", url, e)
     return None
 
 
 # ─────────────────────────────────────────────
-# PORTAL 1: FLATFOX (JSON-API — sehr zuverlässig)
+# PORTAL 1: FLATFOX (JSON-API)
 # ─────────────────────────────────────────────
 def scrape_flatfox(city: str, lat: float, lon: float) -> list[dict]:
     results = []
@@ -178,7 +180,8 @@ def scrape_flatfox(city: str, lat: float, lon: float) -> list[dict]:
         f"&floor_space_to={MAX_AREA}"
     )
     try:
-        r = requests.get(url, headers=HEADERS, timeout=15)
+        headers = {**HEADERS, "Accept": "application/json"}
+        r = requests.get(url, headers=headers, timeout=15)
         if r.status_code != 200:
             log.warning("[Flatfox] %s: HTTP %d", city, r.status_code)
             return []
@@ -214,50 +217,36 @@ def scrape_flatfox(city: str, lat: float, lon: float) -> list[dict]:
 
 
 # ─────────────────────────────────────────────
-# PORTAL 2: HOMEGATE (HTML-Scraping)
+# PORTAL 2: ANIBIS (Schweizer Kleinanzeigen)
 # ─────────────────────────────────────────────
-def scrape_homegate(city: str, lat: float, lon: float) -> list[dict]:
+def scrape_anibis(city: str, lat: float, lon: float) -> list[dict]:
     results = []
-    city_slug = city.lower()
-    url = (
-        f"https://www.homegate.ch/mieten/gewerbeobjekte/ort-{city_slug}"
-        f"?ep={MAX_AREA}&sp={MIN_AREA}"
-    )
-    soup = fetch(url)
-    if not soup:
-        log.warning("[Homegate] %s: Keine Antwort", city)
-        return []
     try:
-        # Homegate rendert via JS — wir holen was statisch verfügbar ist
-        cards = soup.find_all(["article", "div"], 
-                               attrs={"data-test": re.compile("result|listing|item", re.I)})
+        url = f"https://www.anibis.ch/de/immobilien-gewerbe--406?q={city}&r={RADIUS_KM}"
+        soup = fetch_html(url)
+        if not soup:
+            return []
+        cards = soup.find_all("div", class_=re.compile(r"listing|ad-item|result", re.I))
         if not cards:
-            # Fallback: alle Links die nach Inseraten aussehen
-            cards = soup.find_all("a", href=re.compile(r"/mieten/\d+"))[:20]
-
+            cards = soup.find_all("article")[:20]
         for card in cards[:20]:
             text = card.get_text(" ", strip=True)
             if not text or len(text) < 20:
                 continue
-            href = card.get("href", "") or ""
-            if card.name != "a":
-                a = card.find("a", href=True)
-                href = a["href"] if a else ""
+            a    = card.find("a", href=True)
+            href = a["href"] if a else ""
             if href and not href.startswith("http"):
-                href = "https://www.homegate.ch" + href
-            img = card.find("img")
-            img_url = ""
-            if img:
-                img_url = img.get("data-src") or img.get("src") or ""
-            area  = parse_area(text)
-            price = parse_price(text)
+                href = "https://www.anibis.ch" + href
+            img     = card.find("img")
+            img_url = img.get("src", "") if img else ""
+            area    = parse_area(text)
+            price   = parse_price(text)
             if not in_range(area):
                 continue
-            title = text[:80].split("\n")[0]
             results.append({
                 "id":                  make_id(href or text[:80]),
-                "portal":              "Homegate",
-                "title":               title,
+                "portal":              "Anibis",
+                "title":               text[:80],
                 "city":                city,
                 "address":             city,
                 "area_m2":             area,
@@ -268,13 +257,13 @@ def scrape_homegate(city: str, lat: float, lon: float) -> list[dict]:
                 "description_snippet": text[:300],
             })
     except Exception as e:
-        log.error("[Homegate] %s: %s", city, e)
-    log.info("[Homegate] %s: %d gefunden", city, len(results))
+        log.error("[Anibis] %s: %s", city, e)
+    log.info("[Anibis] %s: %d gefunden", city, len(results))
     return results
 
 
 # ─────────────────────────────────────────────
-# PORTAL 3: IMMOSCOUT24 (HTML-Scraping)
+# PORTAL 3: IMMOSCOUT24
 # ─────────────────────────────────────────────
 def scrape_immoscout(city: str, lat: float, lon: float) -> list[dict]:
     results = []
@@ -283,44 +272,78 @@ def scrape_immoscout(city: str, lat: float, lon: float) -> list[dict]:
         f"https://www.immoscout24.ch/de/gewerbe/mieten/ort-{slug}"
         f"?r={RADIUS_KM}&nrf={MIN_AREA}&prf={MAX_AREA}"
     )
-    soup = fetch(url)
+    soup = fetch_html(url)
     if not soup:
-        log.warning("[ImmoScout24] %s: Keine Antwort", city)
         return []
     try:
-        cards = soup.find_all("article")
-        if not cards:
-            cards = soup.find_all("div", class_=re.compile(r"listing|result|item", re.I))
+        # Suche nach JSON-LD Daten (strukturierte Daten im HTML)
+        scripts = soup.find_all("script", type="application/ld+json")
+        for script in scripts:
+            try:
+                import json
+                data = json.loads(script.string or "")
+                items = data if isinstance(data, list) else [data]
+                for item in items:
+                    if item.get("@type") not in ("Apartment", "RealEstateListing", "Product"):
+                        continue
+                    name  = item.get("name", "Gewerbefläche")
+                    url_l = item.get("url", "")
+                    img   = item.get("image", "")
+                    if isinstance(img, list):
+                        img = img[0] if img else ""
+                    desc  = item.get("description", "")
+                    area  = parse_area(str(item.get("floorSize", "")))
+                    price = parse_price(str(item.get("price", "")))
+                    if not in_range(area):
+                        continue
+                    results.append({
+                        "id":                  make_id(url_l or name),
+                        "portal":              "ImmoScout24",
+                        "title":               str(name)[:120],
+                        "city":                city,
+                        "address":             city,
+                        "area_m2":             area,
+                        "price_chf":           price,
+                        "ceiling_height_ok":   check_ceiling(desc),
+                        "image_url":           str(img),
+                        "listing_url":         url_l,
+                        "description_snippet": str(desc)[:300],
+                    })
+            except:
+                pass
 
-        for card in cards[:20]:
-            text = card.get_text(" ", strip=True)
-            if not text or len(text) < 20:
-                continue
-            a    = card.find("a", href=True)
-            href = a["href"] if a else ""
-            if href and not href.startswith("http"):
-                href = "https://www.immoscout24.ch" + href
-            img = card.find("img")
-            img_url = ""
-            if img:
-                img_url = img.get("data-src") or img.get("src") or ""
-            area  = parse_area(text)
-            price = parse_price(text)
-            if not in_range(area):
-                continue
-            results.append({
-                "id":                  make_id(href or text[:80]),
-                "portal":              "ImmoScout24",
-                "title":               text[:80].split("\n")[0],
-                "city":                city,
-                "address":             city,
-                "area_m2":             area,
-                "price_chf":           price,
-                "ceiling_height_ok":   check_ceiling(text),
-                "image_url":           img_url,
-                "listing_url":         href,
-                "description_snippet": text[:300],
-            })
+        # Fallback: direkte HTML-Karten
+        if not results:
+            cards = soup.find_all("article")[:20]
+            for card in cards:
+                text = card.get_text(" ", strip=True)
+                if not text or len(text) < 20:
+                    continue
+                a    = card.find("a", href=True)
+                href = a["href"] if a else ""
+                if href and not href.startswith("http"):
+                    href = "https://www.immoscout24.ch" + href
+                img     = card.find("img")
+                img_url = ""
+                if img:
+                    img_url = img.get("data-src") or img.get("src") or ""
+                area  = parse_area(text)
+                price = parse_price(text)
+                if not in_range(area):
+                    continue
+                results.append({
+                    "id":                  make_id(href or text[:80]),
+                    "portal":              "ImmoScout24",
+                    "title":               text[:80],
+                    "city":                city,
+                    "address":             city,
+                    "area_m2":             area,
+                    "price_chf":           price,
+                    "ceiling_height_ok":   check_ceiling(text),
+                    "image_url":           img_url,
+                    "listing_url":         href,
+                    "description_snippet": text[:300],
+                })
     except Exception as e:
         log.error("[ImmoScout24] %s: %s", city, e)
     log.info("[ImmoScout24] %s: %d gefunden", city, len(results))
@@ -328,58 +351,53 @@ def scrape_immoscout(city: str, lat: float, lon: float) -> list[dict]:
 
 
 # ─────────────────────────────────────────────
-# PORTAL 4: COMPARIS (JSON-API)
+# PORTAL 4: HOMEGATE
 # ─────────────────────────────────────────────
-def scrape_comparis(city: str, lat: float, lon: float) -> list[dict]:
+def scrape_homegate(city: str, lat: float, lon: float) -> list[dict]:
     results = []
+    url = (
+        f"https://www.homegate.ch/mieten/gewerbeobjekte/ort-{city.lower()}"
+        f"?ep={MAX_AREA}&sp={MIN_AREA}"
+    )
+    soup = fetch_html(url)
+    if not soup:
+        return []
     try:
-        # Comparis hat eine interne API
-        api_url = "https://api.comparis.ch/realestate/searchresult"
-        payload = {
-            "RequestObject": {
-                "RentOrBuy": "rent",
-                "PropertyType": "commercial",
-                "Zip": [],
-                "City": city,
-                "RoomFrom": None,
-                "RoomTo": None,
-                "FloorSpaceFrom": MIN_AREA,
-                "FloorSpaceTo": MAX_AREA,
-                "PageIndex": 0,
-                "PageSize": 20,
-            }
-        }
-        headers = {**HEADERS, "Content-Type": "application/json"}
-        r = requests.post(api_url, json=payload, headers=headers, timeout=15)
-        if r.status_code == 200:
-            data = r.json()
-            items = data.get("Items") or data.get("Results") or []
-            for item in items[:20]:
-                area  = item.get("FloorSpace") or item.get("LivingSpace")
-                price = item.get("Price") or item.get("Rent")
-                if not in_range(area):
-                    continue
-                listing_id = str(item.get("Id", ""))
-                href    = f"https://www.comparis.ch/immobilien/marktplatz/details/{listing_id}"
-                desc    = item.get("Description", "") or ""
-                img_url = item.get("MainImageUrl", "") or ""
-                title   = item.get("Title") or item.get("PropertyType") or "Gewerbefläche"
-                results.append({
-                    "id":                  make_id(listing_id or href),
-                    "portal":              "Comparis",
-                    "title":               str(title)[:120],
-                    "city":                city,
-                    "address":             item.get("Street", city),
-                    "area_m2":             float(area) if area else None,
-                    "price_chf":           float(price) if price else None,
-                    "ceiling_height_ok":   check_ceiling(desc),
-                    "image_url":           img_url,
-                    "listing_url":         href,
-                    "description_snippet": str(desc)[:300],
-                })
+        import json
+        # JSON-LD zuerst versuchen
+        scripts = soup.find_all("script", type="application/ld+json")
+        for script in scripts:
+            try:
+                data  = json.loads(script.string or "")
+                items = data if isinstance(data, list) else [data]
+                for item in items:
+                    name  = item.get("name", "")
+                    if not name:
+                        continue
+                    url_l = item.get("url", "")
+                    desc  = item.get("description", "")
+                    area  = parse_area(str(item.get("floorSize", "")))
+                    price = parse_price(str(item.get("price", "")))
+                    if not in_range(area):
+                        continue
+                    results.append({
+                        "id":                  make_id(url_l or name),
+                        "portal":              "Homegate",
+                        "title":               str(name)[:120],
+                        "city":                city,
+                        "address":             city,
+                        "area_m2":             area,
+                        "price_chf":           price,
+                        "ceiling_height_ok":   check_ceiling(desc),
+                        "image_url":           "",
+                        "listing_url":         url_l,
+                        "description_snippet": str(desc)[:300],
+                    })
+            except:
+                pass
     except Exception as e:
-        log.error("[Comparis] %s: %s", city, e)
-    log.info("[Comparis] %s: %d gefunden", city, len(results))
+        log.error("[Homegate] %s: %s", city, e)
+    log.info("[Homegate] %s: %d gefunden", city, len(results))
     return results
 
 
@@ -387,12 +405,13 @@ def scrape_comparis(city: str, lat: float, lon: float) -> list[dict]:
 # HAUPT-CRAWL
 # ─────────────────────────────────────────────
 def run_crawl():
-    run_id = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    run_id  = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    started = datetime.now(timezone.utc).isoformat()
     log.info("═══ Earlybirdie Crawl gestartet · %s ═══", run_id)
     init_db()
 
     total_found = total_inserted = 0
-    scrapers = [scrape_flatfox, scrape_homegate, scrape_immoscout, scrape_comparis]
+    scrapers = [scrape_flatfox, scrape_anibis, scrape_immoscout, scrape_homegate]
 
     for city, (lat, lon) in CITIES.items():
         for scraper in scrapers:
@@ -401,21 +420,25 @@ def run_crawl():
                 total_found += len(listings)
                 inserted = sum(1 for lst in listings if upsert_listing(lst))
                 total_inserted += inserted
-                log.info("  ✓ %s/%s: %d neu von %d", scraper.__name__, city, inserted, len(listings))
+                log.info("  ✓ %s/%s: %d neu von %d",
+                         scraper.__name__, city, inserted, len(listings))
             except Exception as e:
                 log.error("Fehler %s/%s: %s", scraper.__name__, city, e)
-            time.sleep(1.5)  # Höfliche Pause
+            time.sleep(1.5)
 
-    # Crawl-Log
-    conn = get_connection()
-    cur  = conn.cursor()
-    cur.execute(
-        "INSERT INTO crawl_log VALUES (%s,%s,%s,%s,%s)",
-        (run_id, total_found, total_inserted,
-         run_id, datetime.utcnow().isoformat()),
-    )
-    conn.commit()
-    conn.close()
+    # Crawl-Log (alle TEXT-Felder)
+    try:
+        conn = get_connection()
+        cur  = conn.cursor()
+        cur.execute(
+            "INSERT INTO crawl_log VALUES (%s,%s,%s,%s,%s)",
+            (run_id, str(total_found), str(total_inserted),
+             started, datetime.now(timezone.utc).isoformat()),
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        log.warning("crawl_log Fehler (nicht kritisch): %s", e)
 
     log.info("═══ Fertig · %d gefunden · %d neu gespeichert ═══",
              total_found, total_inserted)
