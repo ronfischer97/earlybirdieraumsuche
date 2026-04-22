@@ -1,29 +1,57 @@
 """
-╔═══════════════════════════════════════════════════════════╗
-║         EARLYBIRDIE — Crawler · PostgreSQL Edition        ║
-╚═══════════════════════════════════════════════════════════╝
+EARLYBIRDIE — Crawler · crawler.py (PostgreSQL + Auto-Chromium)
 """
 
 import asyncio
-import psycopg2
-import psycopg2.extras
 import hashlib
 import logging
-import re
 import os
-import time
+import re
+import subprocess
+import sys
 from datetime import datetime
 from typing import Optional
-from playwright.async_api import async_playwright, Page, BrowserContext
+
+# ── Chromium automatisch installieren ──────────────────────
+def install_chromium():
+    """Installiert Chromium-Browser falls noch nicht vorhanden."""
+    chromium_path = os.path.expanduser(
+        "~/.cache/ms-playwright/chromium_headless_shell-1208/"
+        "chrome-headless-shell-linux64/chrome-headless-shell"
+    )
+    if not os.path.exists(chromium_path):
+        print("Installiere Chromium...", flush=True)
+        subprocess.run(
+            [sys.executable, "-m", "playwright", "install", "chromium"],
+            check=True
+        )
+        subprocess.run(
+            [sys.executable, "-m", "playwright", "install-deps", "chromium"],
+            check=False  # Fehler hier nicht abbrechen lassen
+        )
+        print("Chromium installiert!", flush=True)
+    else:
+        print("Chromium bereits vorhanden.", flush=True)
+
+install_chromium()
+
+# ── Jetzt erst Playwright importieren ──────────────────────
+import psycopg2
+import psycopg2.extras
+from playwright.async_api import async_playwright, BrowserContext, Page
+
+# ─────────────────────────────────────────────
+# LOGGING
+# ─────────────────────────────────────────────
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+)
+log = logging.getLogger("earlybirdie")
 
 # ─────────────────────────────────────────────
 # KONFIGURATION
 # ─────────────────────────────────────────────
-DATABASE_URL = os.environ.get(
-    "DATABASE_URL",
-    "postgresql://postgres:axkMSXDLCFvMxpeByNRDjrPYuEvIwKsR@shinkansen.proxy.rlwy.net:26608/railway"
-)
-
 MIN_AREA  = 50
 MAX_AREA  = 120
 RADIUS_KM = 5
@@ -51,20 +79,20 @@ USER_AGENT = (
     "Chrome/124.0.0.0 Safari/537.36"
 )
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-)
-log = logging.getLogger("earlybirdie")
-
 
 # ─────────────────────────────────────────────
 # DATENBANK
 # ─────────────────────────────────────────────
+def get_connection():
+    db_url = os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        raise RuntimeError("DATABASE_URL nicht gesetzt!")
+    return psycopg2.connect(db_url, sslmode="require")
+
+
 def init_db():
-    conn = psycopg2.connect(DATABASE_URL, sslmode="require")
-    conn.autocommit = True
-    cur = conn.cursor()
+    conn = get_connection()
+    cur  = conn.cursor()
     cur.execute("""
         CREATE TABLE IF NOT EXISTS listings (
             id                  TEXT PRIMARY KEY,
@@ -74,24 +102,25 @@ def init_db():
             address             TEXT,
             area_m2             REAL,
             price_chf           REAL,
-            ceiling_height_ok   BOOLEAN DEFAULT FALSE,
+            ceiling_height_ok   INTEGER DEFAULT 0,
             image_url           TEXT,
             listing_url         TEXT,
             description_snippet TEXT,
-            scraped_at          TIMESTAMP DEFAULT NOW()
+            scraped_at          TEXT
         )
     """)
     cur.execute("""
         CREATE TABLE IF NOT EXISTS crawl_log (
-            run_id   TEXT,
-            portal   TEXT,
-            city     TEXT,
-            found    INTEGER,
-            inserted INTEGER,
-            started  TIMESTAMP,
-            finished TIMESTAMP
+            run_id    TEXT,
+            portal    TEXT,
+            city      TEXT,
+            found     INTEGER,
+            inserted  INTEGER,
+            started   TEXT,
+            finished  TEXT
         )
     """)
+    conn.commit()
     conn.close()
     log.info("Datenbank bereit (PostgreSQL)")
 
@@ -101,7 +130,7 @@ def make_id(url: str) -> str:
 
 
 def upsert_listing(listing: dict) -> bool:
-    conn = psycopg2.connect(DATABASE_URL, sslmode="require")
+    conn = get_connection()
     cur  = conn.cursor()
     cur.execute("""
         INSERT INTO listings
@@ -112,9 +141,9 @@ def upsert_listing(listing: dict) -> bool:
     """, (
         listing["id"], listing.get("portal"), listing.get("title"),
         listing.get("city"), listing.get("address"), listing.get("area_m2"),
-        listing.get("price_chf"), bool(listing.get("ceiling_height_ok")),
+        listing.get("price_chf"), 1 if listing.get("ceiling_height_ok") else 0,
         listing.get("image_url"), listing.get("listing_url"),
-        listing.get("description_snippet"), datetime.utcnow(),
+        listing.get("description_snippet"), datetime.utcnow().isoformat(),
     ))
     is_new = cur.rowcount > 0
     conn.commit()
@@ -141,11 +170,9 @@ def parse_price(text: str) -> Optional[float]:
     return float(m.group(1).replace(",", ".")) if m else None
 
 def in_area_range(area: Optional[float]) -> bool:
-    if area is None:
-        return True
-    return MIN_AREA <= area <= MAX_AREA
+    return area is None or MIN_AREA <= area <= MAX_AREA
 
-async def slow_scroll(page: Page, steps: int = 5, delay: float = 0.6):
+async def slow_scroll(page: Page, steps=5, delay=0.6):
     for _ in range(steps):
         await page.evaluate("window.scrollBy(0, window.innerHeight * 0.8)")
         await asyncio.sleep(delay)
@@ -186,10 +213,10 @@ class ImmoScoutScraper:
                     price = parse_price(raw)
                     if not in_area_range(area): continue
                     results.append({
-                        "id": make_id(href or raw[:80]),
-                        "portal": self.PORTAL, "title": raw.split("\n")[0][:120],
-                        "city": city, "address": city, "area_m2": area,
-                        "price_chf": price, "ceiling_height_ok": check_ceiling_height(raw),
+                        "id": make_id(href or raw[:80]), "portal": self.PORTAL,
+                        "title": raw.split("\n")[0][:120], "city": city, "address": city,
+                        "area_m2": area, "price_chf": price,
+                        "ceiling_height_ok": check_ceiling_height(raw),
                         "image_url": img_url, "listing_url": href,
                         "description_snippet": raw[:300],
                     })
@@ -208,8 +235,8 @@ class HomegateScraper:
 
     async def scrape_city(self, city, lat, lon):
         results = []
-        url  = (f"https://www.homegate.ch/mieten/gewerbeobjekte/ort-{city.lower()}"
-                f"?ep={MAX_AREA}&sp={MIN_AREA}")
+        url = (f"https://www.homegate.ch/mieten/gewerbeobjekte/ort-{city.lower()}"
+               f"?ep={MAX_AREA}&sp={MIN_AREA}")
         page = await self.ctx.new_page()
         try:
             await page.goto(url, wait_until="domcontentloaded", timeout=30000)
@@ -233,10 +260,10 @@ class HomegateScraper:
                     price = parse_price(raw)
                     if not in_area_range(area): continue
                     results.append({
-                        "id": make_id(href or raw[:80]),
-                        "portal": self.PORTAL, "title": raw.split("\n")[0][:120],
-                        "city": city, "address": city, "area_m2": area,
-                        "price_chf": price, "ceiling_height_ok": check_ceiling_height(raw),
+                        "id": make_id(href or raw[:80]), "portal": self.PORTAL,
+                        "title": raw.split("\n")[0][:120], "city": city, "address": city,
+                        "area_m2": area, "price_chf": price,
+                        "ceiling_height_ok": check_ceiling_height(raw),
                         "image_url": img_url, "listing_url": href,
                         "description_snippet": raw[:300],
                     })
@@ -255,9 +282,9 @@ class FlatfoxScraper:
 
     async def scrape_city(self, city, lat, lon):
         results = []
-        url  = (f"https://flatfox.ch/api/v1/listing/"
-                f"?latitude={lat}&longitude={lon}&radius={RADIUS_KM*1000}"
-                f"&listing_type=COMMERCIAL&floor_space_from={MIN_AREA}&floor_space_to={MAX_AREA}")
+        url = (f"https://flatfox.ch/api/v1/listing/"
+               f"?latitude={lat}&longitude={lon}&radius={RADIUS_KM*1000}"
+               f"&listing_type=COMMERCIAL&floor_space_from={MIN_AREA}&floor_space_to={MAX_AREA}")
         page = await self.ctx.new_page()
         try:
             resp = await page.goto(url, wait_until="load", timeout=20000)
@@ -273,8 +300,8 @@ class FlatfoxScraper:
                     imgs    = item.get("images", [])
                     img_url = imgs[0].get("url","") if imgs else ""
                     results.append({
-                        "id": make_id(str(item.get("pk", href))),
-                        "portal": self.PORTAL, "title": item.get("title","Gewerbefläche")[:120],
+                        "id": make_id(str(item.get("pk", href))), "portal": self.PORTAL,
+                        "title": item.get("title","Gewerbefläche")[:120],
                         "city": city, "address": item.get("street", city),
                         "area_m2": float(area) if area else None,
                         "price_chf": float(price) if price else None,
@@ -294,7 +321,8 @@ class FlatfoxScraper:
 # HAUPT-CRAWL
 # ─────────────────────────────────────────────
 async def run_crawl():
-    log.info("═══ Earlybirdie Crawl gestartet ═══")
+    run_id = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    log.info("═══ Earlybirdie Crawl gestartet · %s ═══", run_id)
     init_db()
     total_found = total_inserted = 0
 
@@ -312,27 +340,26 @@ async def run_crawl():
         await context.add_init_script(
             "Object.defineProperty(navigator,'webdriver',{get:()=>undefined})"
         )
-
-        scrapers = [
-            ImmoScoutScraper(context),
-            HomegateScraper(context),
-            FlatfoxScraper(context),
-        ]
-
+        scrapers = [ImmoScoutScraper(context), HomegateScraper(context), FlatfoxScraper(context)]
         for city, (lat, lon) in CITIES.items():
             for scraper in scrapers:
                 try:
                     listings = await scraper.scrape_city(city, lat, lon)
                     total_found += len(listings)
-                    for lst in listings:
-                        if upsert_listing(lst):
-                            total_inserted += 1
+                    inserted = sum(1 for lst in listings if upsert_listing(lst))
+                    total_inserted += inserted
+                    log.info("  ✓ %s/%s: %d neu", scraper.PORTAL, city, inserted)
                     await asyncio.sleep(2.5)
                 except Exception as e:
-                    log.error("%s/%s: %s", scraper.PORTAL, city, e)
-
+                    log.error("Fehler %s/%s: %s", scraper.PORTAL, city, e)
         await browser.close()
 
+    conn = get_connection()
+    cur  = conn.cursor()
+    cur.execute("INSERT INTO crawl_log VALUES (%s,%s,%s,%s,%s,%s,%s)",
+        (run_id,"ALL","ALL",total_found,total_inserted,run_id,datetime.utcnow().isoformat()))
+    conn.commit()
+    conn.close()
     log.info("═══ Fertig · %d gefunden · %d neu ═══", total_found, total_inserted)
 
 
